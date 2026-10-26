@@ -17,7 +17,12 @@ the image remotely with ACR Tasks.
 | registry | `caec7709e914acr` (created by `containerapp up`) |
 | providers | `Microsoft.App`, `Microsoft.OperationalInsights`, `Microsoft.ContainerRegistry` all registered |
 
-**Live URL:** `https://avo-lab.lemonfield-d248f0b0.swedencentral.azurecontainerapps.io`
+**The sandbox app was deleted on 2026-10-26** (it was no longer used; the live
+app runs in AVO - Drift, see the end of this file). Its URL
+`https://avo-lab.lemonfield-d248f0b0.swedencentral.azurecontainerapps.io` now
+returns 404, and the environment `avo-lab-env` was deleted the same day. Still
+in the group: the OpenAI resource, the registry `caec7709e914acr` (used by the
+Drift app) and the Log Analytics workspace `workspace-rgntnuws2026zUZs`.
 
 Verified after the first deploy: single replica pinned, secrets stored as
 `secretRef` rather than plaintext, and **SSE streams through the ingress**
@@ -217,8 +222,9 @@ az containerapp delete --name avo-lab --resource-group rg-ntnu-ws-2026 --yes
 az containerapp env delete --name avo-lab-env --resource-group rg-ntnu-ws-2026 --yes
 ```
 
-`containerapp up` also creates a container registry with a generated name. List
-it and delete it separately:
+`containerapp up` also creates a container registry with a generated name.
+**Do not delete `caec7709e914acr`: the live app in AVO - Drift pulls its image
+from it.** To list registries in the group:
 
 ```bash
 az acr list --resource-group rg-ntnu-ws-2026 --query "[].name" --output tsv
@@ -296,9 +302,9 @@ send one attack from `/team`. A reply from Bjørn (or a content-filter verdict)
 proves the path. `Your request was blocked.` or `RBAC: access denied` means the
 app is using a public hostname or is not in the gateway's environment.
 
-**This is the live deployment as of 2026-09-15** (`v9`, revision 3). The
-sections above describe the original sandbox deployment, kept for reference and
-as a fallback; the sandbox app still exists and can be pointed back at Azure
-directly with `LLM_MODE=azure`.
+**This is the live deployment** (since 2026-09-15; running `v16` as of
+2026-10-26). The sections above describe the original sandbox deployment, kept
+for reference. The sandbox app itself was deleted on 2026-10-26; the registry
+and the OpenAI resource in `rg-ntnu-ws-2026` remain and are still in use.
 
 Redeploys follow `REDEPLOY.md` with the resource group and subscription above.

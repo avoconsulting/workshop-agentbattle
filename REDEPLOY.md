@@ -11,7 +11,7 @@ fresh subscription, see `DEPLOY.md` instead.
 | registry | `caec7709e914acr` (still in `avo-internal-sandbox`; the app pulls with the registry's admin credentials) |
 | Contributor on the group | via PIM, activate before redeploying (Azure portal → Privileged Identity Management → My roles → Azure resources) |
 | live URL | https://avo-lab.agreeablehill-b8713d17.norwayeast.azurecontainerapps.io |
-| currently deployed | `v9` — Bifrost backend, `reasoning_effort: none`, concurrency 10 |
+| currently deployed | `v16` (checked 2026-10-26) |
 
 ---
 
@@ -155,10 +155,12 @@ That clears the game without touching the container at all.
 az containerapp secret set --name avo-lab --resource-group avo-local-resources --subscription be94a0b9-5740-4660-aac9-04ddec5adba7 --secrets bifrost-virtual-key="<new virtual key>" admin-code="<new admin code>"
 ```
 
-Secrets do not take effect until the container restarts:
+Secrets do not take effect until the container restarts. Use the tag that is
+**currently live** (check with the `az containerapp show` above); pointing at an
+older tag here is a rollback:
 
 ```bash
-az containerapp update --name avo-lab --resource-group avo-local-resources --subscription be94a0b9-5740-4660-aac9-04ddec5adba7 --image caec7709e914acr.azurecr.io/avo-lab:v9
+az containerapp update --name avo-lab --resource-group avo-local-resources --subscription be94a0b9-5740-4660-aac9-04ddec5adba7 --image caec7709e914acr.azurecr.io/avo-lab:v16
 ```
 
 Non-secret values (join code, gateway URL, model) go through `--set-env-vars` on the
@@ -186,10 +188,11 @@ Newest first, as of the last check:
 
 | tag | what it is |
 |---|---|
-| `v9` | **live.** Bifrost gateway backend (internal hostname), `none` reasoning, concurrency 10, full error text in the admin panel |
+| `v16` | **live** (checked 2026-10-26). `v10`–`v15` are not catalogued here; see `git log` |
+| `v9` | live from 2026-09-15. Bifrost gateway backend (internal hostname), `none` reasoning, concurrency 10, full error text in the admin panel |
 | `v8` | Bifrost backend, first attempt; ran in the sandbox and was blocked by the gateway's IP allow-list |
 | `v7` | built, never deployed. Persona vaults (Bjørn / Pia / Arne Benjamin) with photos, the Norwegian presentation phase, "Språkmodell hackathon" title, content-filter verdicts, Arne Benjamin softened twice |
-| `v6` | **live.** Built outside this session on 2026-09-09 15:18; contents uncertain |
+| `v6` | live from 2026-09-09 until `v9`. Built outside this session on 2026-09-09 15:18; contents uncertain |
 | `v5` | Tied ranks, tougher practice bot, build-window timer, practice-duel deal bonus, fixed projector captions, finalist prompt reveal |
 | `gatekeeper-v2` | per-team vault ladder, +50 per breach, 15 minute round |
 | `banner-fix` | public URLs in the startup banner, calibrated Gatekeeper tiers |
