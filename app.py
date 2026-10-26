@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import time
 from typing import Any, Optional
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -125,9 +126,97 @@ def require_team(token: Optional[str]):
     return team
 
 
-def require_admin(code: Optional[str]) -> None:
-    if (code or "") != config.ADMIN_CODE:
-        raise HTTPException(status_code=401, detail="Bad admin code")
+class AdminGuard:
+    """Slows down guessing of the admin code without ever locking anyone out.
+
+    A wrong code is answered only after a delay that doubles with each
+    consecutive failure from the same client address (1s, 2s, 4s ... capped),
+    and wrong attempts from one address are answered one at a time, so a
+    guesser gets a handful of tries per minute however much they parallelise.
+    A correct code is checked first and never waits: at the venue every laptop
+    shares one NAT address with the facilitator, so a lockout keyed on the
+    address would hand any student a way to shut the admin panel. Failures are
+    forgotten after `admin.fail_reset_s` of quiet, or on the next success.
+    """
+
+    max_waiting = 8  # queued wrong attempts per address before answering 429 at once
+
+    def __init__(self) -> None:
+        self._failures: dict[str, tuple[int, float]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._waiting: dict[str, int] = {}
+
+    def reset(self) -> None:
+        self._failures.clear()
+        self._locks.clear()
+        self._waiting.clear()
+
+    @staticmethod
+    def delay_for(failures: int) -> float:
+        base = max(0.0, float(cfg("admin.fail_delay_s", 1.0)))
+        cap = max(0.0, float(cfg("admin.fail_delay_max_s", 10.0)))
+        return min(cap, base * (2 ** max(0, failures - 1)))
+
+    def failures(self, key: str) -> int:
+        count, last = self._failures.get(key, (0, 0.0))
+        if count and time.time() - last > float(cfg("admin.fail_reset_s", 600)):
+            self._failures.pop(key, None)
+            return 0
+        return count
+
+    def forgive(self, key: str) -> None:
+        self._failures.pop(key, None)
+
+    async def punish(self, key: str) -> None:
+        """Record a wrong code from `key` and hold the reply for its delay."""
+        count = self.failures(key) + 1
+        self._failures[key] = (count, time.time())
+        if len(self._failures) > 2000:  # a flood of addresses: keep the table small
+            cutoff = time.time() - float(cfg("admin.fail_reset_s", 600))
+            self._failures = {k: v for k, v in self._failures.items() if v[1] >= cutoff}
+        if self._waiting.get(key, 0) >= self.max_waiting:
+            raise HTTPException(status_code=429, detail="Too many bad admin codes from this address")
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        self._waiting[key] = self._waiting.get(key, 0) + 1
+        try:
+            async with lock:
+                delay = self.delay_for(count)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        finally:
+            self._waiting[key] -= 1
+            if self._waiting[key] <= 0:
+                self._waiting.pop(key, None)
+                self._locks.pop(key, None)
+
+
+admin_guard = AdminGuard()
+
+
+def _client_key(request: Request) -> str:
+    client = request.client
+    return client.host if client else "unknown"
+
+
+def admin_code_ok(code: Optional[str]) -> bool:
+    """Constant-time comparison, so response timing says nothing about the code."""
+    return hmac.compare_digest((code or "").encode("utf-8"), config.ADMIN_CODE.encode("utf-8"))
+
+
+async def check_admin_code(request: Request, code: Optional[str]) -> None:
+    key = _client_key(request)
+    if admin_code_ok(code):
+        admin_guard.forgive(key)
+        return
+    await admin_guard.punish(key)
+    raise HTTPException(status_code=401, detail="Bad admin code")
+
+
+async def require_admin(
+    request: Request, x_admin_code: Optional[str] = Header(default=None)
+) -> None:
+    """FastAPI dependency: admin endpoints declare `_admin: None = Depends(require_admin)`."""
+    await check_admin_code(request, x_admin_code)
 
 
 def require_phase(*allowed: Phase) -> None:
@@ -523,15 +612,13 @@ def _recent_highlights(limit: int) -> list[dict]:
 # --- admin API ---------------------------------------------------------------
 
 @app.post("/api/admin/auth")
-async def api_admin_auth(body: dict = Body(...)):
-    if str(body.get("code", "")) != config.ADMIN_CODE:
-        raise HTTPException(status_code=401, detail="Bad admin code")
+async def api_admin_auth(request: Request, body: dict = Body(...)):
+    await check_admin_code(request, str(body.get("code", "")))
     return {"ok": True}
 
 
 @app.get("/api/admin/state")
-async def api_admin_state(x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_state(_admin: None = Depends(require_admin)):
     return {
         "phase": state.phase.value,
         "phases": [p.value for p in PHASE_ORDER],
@@ -572,10 +659,9 @@ async def api_admin_state(x_admin_code: Optional[str] = Header(default=None)):
 
 @app.post("/api/admin/slide")
 async def api_admin_slide(
-    body: dict = Body(default={}), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(default={}), _admin: None = Depends(require_admin)
 ):
     """Advance the presentation. Driven by arrow keys on the projector or the panel."""
-    require_admin(x_admin_code)
     total = len(_slides())
     action = str(body.get("action", "set")).lower()
     if action == "next":
@@ -592,9 +678,8 @@ async def api_admin_slide(
 
 @app.post("/api/admin/phase")
 async def api_admin_phase(
-    body: dict = Body(...), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(...), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     try:
         phase = Phase(str(body.get("phase", "")).upper())
     except ValueError:
@@ -618,9 +703,8 @@ async def api_admin_phase(
 
 @app.post("/api/admin/config")
 async def api_admin_config(
-    body: dict = Body(...), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(...), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     path = str(body.get("path", ""))
     if not path:
         raise HTTPException(status_code=400, detail="Missing config path")
@@ -635,9 +719,8 @@ async def api_admin_config(
 
 @app.post("/api/admin/gatekeeper/tier")
 async def api_admin_tier(
-    body: dict = Body(...), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(...), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     index = body.get("index")
     if index is None:
         index = gk.current_tier_index() + 1
@@ -646,10 +729,9 @@ async def api_admin_tier(
 
 @app.post("/api/admin/gatekeeper/round")
 async def api_admin_gk_round(
-    body: dict = Body(default={}), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(default={}), _admin: None = Depends(require_admin)
 ):
     """Start, extend or stop the timed Gatekeeper round."""
-    require_admin(x_admin_code)
     action = str(body.get("action", "start")).lower()
     if action == "start":
         minutes = body.get("minutes")
@@ -668,10 +750,9 @@ async def api_admin_gk_round(
 
 @app.post("/api/admin/gatekeeper/team_tier")
 async def api_admin_team_tier(
-    body: dict = Body(...), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(...), _admin: None = Depends(require_admin)
 ):
     """Nudge one team up or down the ladder (stuck team, or an unfair loss)."""
-    require_admin(x_admin_code)
     team_id = str(body.get("team_id", ""))
     if team_id not in state.teams:
         raise HTTPException(status_code=404, detail="Unknown team")
@@ -682,29 +763,26 @@ async def api_admin_team_tier(
 
 
 @app.post("/api/admin/gatekeeper/reset")
-async def api_admin_gk_reset(x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_gk_reset(_admin: None = Depends(require_admin)):
     gk.reset_gatekeeper()
     return {"ok": True}
 
 
 @app.get("/api/admin/gatekeeper/attempts")
 async def api_admin_gk_attempts(
-    limit: int = 60, x_admin_code: Optional[str] = Header(default=None)
+    limit: int = 60, _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     return gk.gatekeeper_payload(include_attempts=max(1, min(limit, 300)))
 
 
 @app.get("/api/admin/cheatsheet")
-async def api_admin_cheatsheet(x_admin_code: Optional[str] = Header(default=None)):
+async def api_admin_cheatsheet(_admin: None = Depends(require_admin)):
     """Facilitator cheat sheet: hit rates per technique and vault, plus hints.
 
     cheatsheet.json is written by scripts/crack_vaults.py --update-cheatsheet.
     The code words are NOT stored there; they come from the live tier config,
     so the sheet stays right if a secret is changed without a re-run.
     """
-    require_admin(x_admin_code)
     path = config.ROOT / "cheatsheet.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="cheatsheet.json missing")
@@ -719,9 +797,8 @@ async def api_admin_cheatsheet(x_admin_code: Optional[str] = Header(default=None
 
 @app.post("/api/admin/group_stage/run")
 async def api_admin_group_run(
-    body: dict = Body(default={}), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(default={}), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     task = _background.get("group_stage")
     if task and not task.done():
         raise HTTPException(status_code=409, detail="Group stage is already running")
@@ -742,8 +819,7 @@ async def api_admin_group_run(
 
 
 @app.post("/api/admin/group_stage/cancel")
-async def api_admin_group_cancel(x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_group_cancel(_admin: None = Depends(require_admin)):
     task = _background.get("group_stage")
     if task and not task.done():
         task.cancel()
@@ -755,9 +831,8 @@ async def api_admin_group_cancel(x_admin_code: Optional[str] = Header(default=No
 
 @app.post("/api/admin/bracket/build")
 async def api_admin_bracket_build(
-    body: dict = Body(default={}), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(default={}), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     seeds = body.get("seeds")
     state.bracket = neg.build_bracket(seeds if seeds else None)
     mark_dirty()
@@ -769,9 +844,8 @@ async def api_admin_bracket_build(
 
 @app.post("/api/admin/match/run")
 async def api_admin_match_run(
-    body: dict = Body(...), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(...), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     task = _background.get("match")
     if task and not task.done():
         raise HTTPException(status_code=409, detail="A match is already running")
@@ -793,31 +867,27 @@ async def api_admin_match_run(
 
 
 @app.post("/api/admin/llm/pause")
-async def api_admin_pause(x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_pause(_admin: None = Depends(require_admin)):
     llm.pause()
     bus.publish("llm", llm.snapshot_stats())
     return {"ok": True, "paused": True}
 
 
 @app.post("/api/admin/llm/resume")
-async def api_admin_resume(x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_resume(_admin: None = Depends(require_admin)):
     llm.resume()
     bus.publish("llm", llm.snapshot_stats())
     return {"ok": True, "paused": False}
 
 
 @app.post("/api/admin/snapshot/save")
-async def api_admin_snapshot_save(x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_snapshot_save(_admin: None = Depends(require_admin)):
     save_snapshot(force=True)
     return {"ok": True, "snapshot": snapshot_info()}
 
 
 @app.post("/api/admin/snapshot/load")
-async def api_admin_snapshot_load(x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_snapshot_load(_admin: None = Depends(require_admin)):
     task = _background.get("group_stage")
     if task and not task.done():
         raise HTTPException(status_code=409, detail="Stop the group stage before restoring")
@@ -833,9 +903,8 @@ async def api_admin_snapshot_load(x_admin_code: Optional[str] = Header(default=N
 
 @app.post("/api/admin/team/update")
 async def api_admin_team_update(
-    body: dict = Body(...), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(...), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     team = state.teams.get(str(body.get("team_id", "")))
     if not team:
         raise HTTPException(status_code=404, detail="Unknown team")
@@ -863,9 +932,8 @@ async def api_admin_team_update(
 
 @app.get("/api/admin/team/prompt")
 async def api_admin_team_prompt(
-    team_id: str, version: str = "group", x_admin_code: Optional[str] = Header(default=None)
+    team_id: str, version: str = "group", _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     agent = state.agents.get((team_id, version))
     return {
         "team_id": team_id,
@@ -877,9 +945,8 @@ async def api_admin_team_prompt(
 
 @app.get("/api/admin/duels")
 async def api_admin_duels(
-    stage: str = "group", limit: int = 50, x_admin_code: Optional[str] = Header(default=None)
+    stage: str = "group", limit: int = 50, _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     duels = sorted(state.results_for_stage(stage), key=lambda r: r.ended_at, reverse=True)[:limit]
     return {
         "duels": [
@@ -897,8 +964,7 @@ async def api_admin_duels(
 
 
 @app.get("/api/admin/duel")
-async def api_admin_duel(duel_id: str, x_admin_code: Optional[str] = Header(default=None)):
-    require_admin(x_admin_code)
+async def api_admin_duel(duel_id: str, _admin: None = Depends(require_admin)):
     result = state.results.get(duel_id)
     if not result:
         raise HTTPException(status_code=404, detail="Unknown duel")
@@ -910,10 +976,9 @@ async def api_admin_duel(duel_id: str, x_admin_code: Optional[str] = Header(defa
 
 @app.post("/api/admin/window")
 async def api_admin_window(
-    body: dict = Body(default={}), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(default={}), _admin: None = Depends(require_admin)
 ):
     """Control the clock on whichever prompt-writing phase is open."""
-    require_admin(x_admin_code)
     action = str(body.get("action", "set")).lower()
     if action == "close":
         state.submission_ends_at = time.time()
@@ -932,9 +997,8 @@ async def api_admin_window(
 
 @app.post("/api/admin/reset_event")
 async def api_admin_reset(
-    body: dict = Body(default={}), x_admin_code: Optional[str] = Header(default=None)
+    body: dict = Body(default={}), _admin: None = Depends(require_admin)
 ):
-    require_admin(x_admin_code)
     if str(body.get("confirm", "")).upper() != "RESET":
         raise HTTPException(status_code=400, detail='Send {"confirm": "RESET"} to wipe the event')
     keep_teams = bool(body.get("keep_teams", False))

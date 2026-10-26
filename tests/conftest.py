@@ -19,6 +19,13 @@ def force_mock_backend(tmp_path, monkeypatch):
     config.patch_config("llm.mock_latency_s", 0)
     llm.reset_backend()
     llm.resume()
+    # Wrong admin codes are throttled per client address; tests that probe a
+    # bad code should not pay the real delay, and no test inherits another's
+    # failure count.
+    config.patch_config("admin.fail_delay_s", 0)
+    from app import admin_guard
+
+    admin_guard.reset()
     yield
 
 

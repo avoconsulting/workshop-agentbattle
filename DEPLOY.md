@@ -96,7 +96,9 @@ What the infra owner should know:
   caps itself at 10 concurrent model calls (`llm.max_concurrency`) to stay
   around 70 % of the 200k TPM quota. Raise the quota in Foundry to go faster.
 * **Access control is application-level**: a join code for students and an
-  admin code for the facilitator. No Entra login in front of the app.
+  admin code for the facilitator. No Entra login in front of the app. The
+  admin code is compared in constant time and wrong guesses from one address
+  are answered one at a time with a growing delay; a correct code never waits.
 
 ---
 

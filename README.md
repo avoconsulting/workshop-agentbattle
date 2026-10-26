@@ -205,8 +205,10 @@ model change still means re-running the three calibration scripts.
 
 **`config.yaml`** (game tuning, safe to commit) — pot, message cap, char limit, deal bonus,
 playoff format, inter-message delay, LLM concurrency/timeouts/retries, gatekeeper secret and tier
-prompts, the practice-bot prompt, the fallback prompt, and the `rules_block` injected into every
-turn.
+prompts, the practice-bot prompt, the fallback prompt, the `rules_block` injected into every
+turn, and the admin-login throttle (`admin.*`: a wrong admin code is answered after a delay that
+doubles per consecutive failure from the same address; a correct code never waits, so it cannot
+lock the facilitator out even when the whole venue shares one NAT address).
 
 Anything you might need to change at the venue is config, not code. The admin panel can patch the
 most likely candidates (deal bonus, concurrency, message delay) live without a restart.
@@ -291,7 +293,7 @@ games/negotiation.py    duel loop, round-robin, scoring, playoffs
 games/gatekeeper.py     attacks, tiers, breach detection
 web/{team,projector,admin}.html
 scripts/dry_run.py      headless dress rehearsal
-tests/                  82 tests
+tests/                  138 tests
 ```
 
 No database. In-memory state plus a JSON snapshot, which is a crash-recovery net for one event —
@@ -322,10 +324,10 @@ strips every action-shaped blob from the displayed text, logs invalid attempts, 
 pytest -q
 ```
 
-82 tests: exhaustive action-parser cases, offer/accept validation, the standing-offer rule,
+138 tests: exhaustive action-parser cases, offer/accept validation, the standing-offer rule,
 self-accept rejection, truncation, LLM-failure handling, scoring and tie-breaks, a full 6-team
 group stage, bracket shapes for 2/3/4+ teams, gatekeeper normalisation, snapshot round-trip,
-phase gating, rate limits, name sanitisation, and a load-ish test that runs a 15-team group stage
+phase gating, rate limits, the admin-login throttle, name sanitisation, and a load-ish test that runs a 15-team group stage
 (210 duels) alongside concurrent practice duels while asserting the event loop never stalls.
 
 ### Dress rehearsal — the test that actually matters

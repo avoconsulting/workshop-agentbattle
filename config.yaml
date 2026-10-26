@@ -5,6 +5,17 @@
 event:
   title: "Språkmodell hackathon"
 
+admin:
+  # A wrong admin code is answered only after a delay that doubles with each
+  # consecutive failure from the same client address, capped. Wrong attempts
+  # from one address are answered one at a time. A correct code is checked
+  # first and never waits, so this cannot lock the facilitator out even when
+  # the whole venue shares one NAT address. Failures are forgotten after
+  # fail_reset_s of quiet or on the next success.
+  fail_delay_s: 1
+  fail_delay_max_s: 10
+  fail_reset_s: 600
+
 negotiation:
   pot: 100
   max_messages: 6          # total messages in a duel (3 per side)

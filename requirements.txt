@@ -1,8 +1,15 @@
-fastapi>=0.110
-uvicorn[standard]>=0.27
-httpx>=0.27
-openai>=1.30
-python-dotenv>=1.0
-PyYAML>=6.0
-pytest>=8.0
-pytest-asyncio>=0.23
+# Pinned on 2026-10-26 to the versions the app was developed and rehearsed
+# with. The Docker build resolves this file fresh on every `az acr build`, so
+# without pins a redeploy silently picks up whatever PyPI has that day (openai
+# went 2.x -> 3.x between two deploys). To upgrade: bump here, run pytest and
+# scripts/check_llm.py against the gateway, then redeploy.
+fastapi==0.141.1
+starlette==1.3.1          # fastapi's HTTP layer; pinned so TestClient behaviour is stable
+pydantic==2.13.4
+uvicorn[standard]==0.52.1
+httpx==0.28.1
+openai==2.53.0
+python-dotenv==1.2.2
+PyYAML==6.0.3
+pytest==9.1.1
+pytest-asyncio==1.4.0
